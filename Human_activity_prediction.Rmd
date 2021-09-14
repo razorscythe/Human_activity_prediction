@@ -1,0 +1,144 @@
+---
+title: "Human Activity Prediction"
+author: "Aman Tiwari"
+date: "14/09/2021"
+output: html_document
+---
+
+# Background
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har
+
+# Data
+The training data for this project are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+The test data are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+The data for this project come from this source: http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har.
+
+# Goal
+The goal of this project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. I may use any of the other variables to predict with. I should create a report describing how I built my model, how I used cross validation, what I think the expected out of sample error is, and why I made the choices I did. I will also use my prediction model to predict 20 different test cases.
+
+# Executive Summary
+ 
+# Loading packages and Data
+```{r}
+pacman::p_load(data.table, caret, parallel, doParallel, purrr, visdat, dplyr, printr, kableExtra, corrplot, e1071, randomForest)
+```
+
+```{r}
+# training data
+url_train <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+
+training <- fread(url_train,
+                  na.strings = c("#DIV/0", "", "NA"),
+                  stringsAsFactors = TRUE)
+    
+# testing data
+url_test <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+testing <- fread(url_test,
+                 na.strings = c("#DIV/0", "", "NA"),
+                 stringsAsFactors = TRUE)
+```
+
+# EDA and Data preprocessing
+First we look at the basic structure of the data to get a glimpse of what we are dealing with.
+```{r}
+# glimpse(training) - output is too large to be displayed here.
+dim(training)
+```
+Looking at the data we see a large number of variables i.e 160 in our model. Many of these predictors are not useful for building the model. So we try to remove the unwanted variables. First we remove the first seven variables which are the names, timestamps and other not useful data. 
+```{r}
+training <- training[,-c(1:7)]
+testing <- testing[,-c(1:7)]
+```
+Now we will reduce the variables containing large amount of NA values. For this we will make use of the purrr package's discard function and set our threshold of 70% NA values.
+```{r}
+na_remove <- function(data, x){
+  data %>% discard(~sum(is.na(.x))/length(.x)*100> x)
+}
+
+train_clean <- na_remove(training, 70)
+test_clean <- na_remove(testing, 70)
+
+rbind(training=dim(train_clean), testing= dim(test_clean))
+```
+Now we observe that 49 variables are left. Now we will split the training data into training and validation data so as to test the model before finally using the testing data. 
+```{r}
+set.seed(2021)
+inTrain <- createDataPartition(train_clean$classe, p=0.7, list = F)
+train <- train_clean[inTrain, ]
+validation <- train_clean[-inTrain, ]
+```
+Now we perform some EDA by observing which of the variables are highly correlated with each other.
+```{r}
+data_corr <- select_if(train, is.numeric)
+corrplot(
+  cor(data_corr),
+  method="color",
+  tl.pos = "n",
+  insig = "blank"
+)
+```
+Our correlation plot shows that most of our data is not correlated with very few exceptions. As we are using Random Forest method to train our data, highly correlated variables may result in inaccurate predictions. 
+
+# Predictions
+I will be using the random forest method to train our data because it's flexible and provides high accuracy predictions through cross-validation. First we need to setup parallel processing so as to ensure fast processing of data. 
+```{r}
+cl <- makeCluster(detectCores()-1)
+registerDoParallel(cl)
+```
+Now we will start training the data. First we will set the k-folds to 7 using the trainControl() function. Also we will set allowParallel to be True for parallel processing. 
+```{r}
+set.seed(2021)
+fitcontrol <- trainControl(method = "cv", number = 7, allowParallel = T)
+rf.fit <- train(classe~., method= "rf", data= train, trControl= fitcontrol)
+stopCluster(cl)
+registerDoSEQ()
+
+#save model into RDS format to save time 
+saveRDS(rf.fit, file = "rfmodel.rds")
+```
+## Model Performance 
+Now we check our model performance. 
+```{r}
+model.rf <- readRDS(file = "rfmodel.rds")
+model.rf
+```
+From the result, we see that the optimal model, has an accuracy of 0.99. 
+```{r}
+model.rf$finalModel
+```
+We also observe that out of bag error is 1.13%. This means that our accuracy is considered high and acceptable for our prediction. Below we see the plot for the error of each classe prediction as the number of trees increase, and we see that as we reach around 50 trees, the OOB becomes flat, and we can use 50 as the ntrees for our trcontrol if we decide to further fine-tune our model.
+
+```{r}
+plot(model.rf$finalModel)
+```
+## Variable Importance
+```{r}
+importance <- varImp(model.rf, scale=F)
+plot(importance, top=10)
+```
+The varImp function informs us that the most important function in predicting the classe variable is magnet_dumbell_z.
+
+## Prediction on validation test set
+Using our trained model, we can apply on the validation set to observe the accuracy. 
+```{r}
+pred.df <- predict(model.rf, validation)
+confMAtrix <- confusionMatrix(validation$classe, pred.df)
+confMAtrix$table
+```
+```{r}
+confMAtrix$overall["Accuracy"]
+```
+We obtain a accuracy of 0.99, which means onlly 1% of the classe variable were falsely identified.
+## Final Prediction on Test set
+Now finally we predict our model on the test dataset.
+```{r}
+final_pred.df <- predict(model.rf, test_clean)
+summary(final_pred.df)
+final_pred.df
+```
+
+# Citations
+Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. Wearable Computing: Accelerometers’ Data Classification of Body Postures and Movements. Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. DOI: 10.1007/978-3-642-34459-6_6.
